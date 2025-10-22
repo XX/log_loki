@@ -6,13 +6,15 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-use crate::LokiFormatter;
-use bitflags::bitflags;
-#[cfg(feature = "kv_unstable")]
-use log::kv::{value::Error as LogError, Key, Value, Visitor};
-use log::Record;
 use std::collections::HashSet;
 use std::fmt::Write;
+
+use bitflags::bitflags;
+use log::Record;
+#[cfg(feature = "kv_unstable")]
+use log::kv::{Key, Value, Visitor, value::Error as LogError};
+
+use crate::LokiFormatter;
 
 // Contains all characters that may not appear in logfmt keys
 const INVALID_KEY_CHARS: &[char] = &[' ', '=', '"'];
@@ -77,11 +79,11 @@ impl LogfmtFormatter {
                     need_quotes = true;
                     formatted_value.push('\\');
                     formatted_value.push(chr);
-                }
+                },
                 ' ' | '=' => {
                     need_quotes = true;
                     formatted_value.push(chr);
-                }
+                },
 
                 '\n' | '\r' | '\t' => {
                     need_quotes = true;
@@ -91,7 +93,7 @@ impl LogfmtFormatter {
                     }
 
                     formatted_value.push(chr);
-                }
+                },
                 _ => {
                     if !chr.is_control() {
                         formatted_value.push(chr);
@@ -99,7 +101,7 @@ impl LogfmtFormatter {
                         need_quotes = true;
                         formatted_value.push_str(&chr.escape_unicode().to_string());
                     }
-                }
+                },
             }
         }
         if need_quotes {
@@ -109,21 +111,9 @@ impl LogfmtFormatter {
         write!(
             dst,
             "{}{}={}{}",
-            {
-                if used_fields.is_empty() {
-                    ""
-                } else {
-                    " "
-                }
-            },
+            { if used_fields.is_empty() { "" } else { " " } },
             key,
-            {
-                if need_quotes {
-                    "\""
-                } else {
-                    ""
-                }
-            },
+            { if need_quotes { "\"" } else { "" } },
             formatted_value
         )
     }
@@ -153,12 +143,7 @@ impl LokiFormatter for LogfmtFormatter {
         }
 
         if self.include_fields.contains(LogfmtAutoFields::TARGET) && rec.target() != "" {
-            self.write_pair(
-                dst,
-                &mut used_fields,
-                &mut "target".to_owned(),
-                rec.target(),
-            )?;
+            self.write_pair(dst, &mut used_fields, &mut "target".to_owned(), rec.target())?;
         }
 
         if self.include_fields.contains(LogfmtAutoFields::MODULE_PATH) {
@@ -227,12 +212,8 @@ struct LogfmtVisitor<'a> {
 #[cfg(feature = "kv_unstable")]
 impl<'a, 'kvs> Visitor<'kvs> for LogfmtVisitor<'a> {
     fn visit_pair(&mut self, key: Key<'kvs>, value: Value<'kvs>) -> Result<(), LogError> {
-        self.fmt.write_pair(
-            self.dst,
-            self.used,
-            &mut key.to_string(),
-            &value.to_string(),
-        )?;
+        self.fmt
+            .write_pair(self.dst, self.used, &mut key.to_string(), &value.to_string())?;
         Ok(())
     }
 }
@@ -241,6 +222,7 @@ bitflags! {
     /// `LogfmtAutoFields` is used to determine what fields of a log::Record should be rendered into
     /// the final logfmt string by the `LogfmtFormatter`. The default set is LEVEL | MESSAGE | MODULE_PATH
     /// | EXTRA
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct LogfmtAutoFields: u32 {
         /// Include a `level` field indicating the level the message was logged at.
         const LEVEL = 1;

@@ -6,15 +6,16 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-use kanal::{unbounded, Sender};
-use log::{set_boxed_logger, set_max_level, LevelFilter, Log, Metadata, Record, SetLoggerError};
-#[cfg(feature = "tls")]
-use rustls::client::ClientConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::spawn;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use url::Url;
+
+use http::Uri;
+use kanal::{Sender, unbounded};
+use log::{LevelFilter, Log, Metadata, Record, SetLoggerError, set_boxed_logger, set_max_level};
+#[cfg(feature = "tls")]
+use ureq::tls::TlsConfig;
 
 // background task for sending logs to loki
 mod task;
@@ -25,16 +26,16 @@ pub use fmt::LokiFormatter;
 #[cfg(feature = "logfmt")]
 mod logfmt;
 #[cfg(feature = "logfmt")]
-pub use logfmt::{LogfmtFormatter, LogfmtAutoFields};
+pub use logfmt::{LogfmtAutoFields, LogfmtFormatter};
 
 /// `LokiBuilder` is used to construct the `Loki` object.
 #[must_use = "Has no affect unless .build() is called."]
 pub struct LokiBuilder {
-    endpoint: Url,
+    endpoint: Uri,
     labels: HashMap<String, String>,
     headers: HashMap<String, String>,
     #[cfg(feature = "tls")]
-    tls_config: Option<Arc<ClientConfig>>,
+    tls_config: Option<Arc<TlsConfig>>,
     max_log_lines: usize,
     max_log_lifetime: Duration,
     failure_policy: FailurePolicy,
@@ -44,7 +45,7 @@ pub struct LokiBuilder {
 
 impl LokiBuilder {
     /// Construct a new Loki builder with the given endpoint and labels.
-    pub fn new(endpoint: Url, labels: HashMap<String, String>) -> LokiBuilder {
+    pub fn new(endpoint: Uri, labels: HashMap<String, String>) -> LokiBuilder {
         assert!(!labels.is_empty(), "At least one label must be specified!");
 
         LokiBuilder {
@@ -72,7 +73,7 @@ impl LokiBuilder {
 
     #[cfg(feature = "tls")]
     /// Configure rustls for HTTPS requests. Passed directly to ureq.
-    pub fn tls_config(mut self, tls_config: Arc<ClientConfig>) -> LokiBuilder {
+    pub fn tls_config(mut self, tls_config: Arc<TlsConfig>) -> LokiBuilder {
         self.tls_config = Some(tls_config);
         self
     }
@@ -173,9 +174,7 @@ impl Loki {
             tx,
             level_filter: filter,
             flush_notif,
-            fmt: fmt.expect(
-                "When the logfmt feature is disabled, you are required to provide a formatter.",
-            ),
+            fmt: fmt.expect("When the logfmt feature is disabled, you are required to provide a formatter."),
         }
     }
 

@@ -6,28 +6,32 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-use crate::FailurePolicy;
 use core::cmp::Reverse;
-use derivative::Derivative;
-#[cfg(feature = "compress")]
-use flate2::{write::GzEncoder, Compression};
-use kanal::{ReceiveErrorTimeout, Receiver};
-#[cfg(feature = "tls")]
-use rustls::ClientConfig;
-use serde::Serialize;
-use serde_json::to_vec;
 use std::collections::{BinaryHeap, HashMap};
 #[cfg(feature = "compress")]
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use ureq::{AgentBuilder, Error, Request};
-use url::Url;
+
+use derivative::Derivative;
+#[cfg(feature = "compress")]
+use flate2::{Compression, write::GzEncoder};
+use http::Uri;
+use kanal::{ReceiveErrorTimeout, Receiver};
+use serde::Serialize;
+use serde_json::to_vec;
+#[cfg(feature = "tls")]
+use ureq::tls::TlsConfig;
+use ureq::{Agent, Error};
+
+use crate::FailurePolicy;
 
 // LokiTask is a background thread that is used to send logs to Loki in the background
 pub struct LokiTask {
     rx: Receiver<LokiTaskMsg>,
-    request: Request,
+    agent: Agent,
+    endpoint: Uri,
+    headers: HashMap<String, String>,
     labels: HashMap<String, String>,
     max_log_lines: usize,
     max_log_lifetime: Duration,
@@ -36,38 +40,32 @@ pub struct LokiTask {
 }
 
 impl LokiTask {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rx: Receiver<LokiTaskMsg>,
         flush_notif: Arc<(Mutex<bool>, Condvar)>,
-        endpoint: Url,
+        endpoint: Uri,
         headers: HashMap<String, String>,
         labels: HashMap<String, String>,
         max_log_lines: usize,
         max_log_lifetime: Duration,
         failure_policy: FailurePolicy,
-        #[cfg(feature = "tls")] tls_config: Option<Arc<ClientConfig>>,
+        #[cfg(feature = "tls")] tls_config: Option<Arc<TlsConfig>>,
     ) -> LokiTask {
-        let mut agent_builder = AgentBuilder::new().timeout(Duration::from_secs(30));
+        let mut agent_builder = Agent::config_builder().timeout_global(Some(Duration::from_secs(30)));
 
         #[cfg(feature = "tls")]
-        if let Some(tls_config) = tls_config {
-            agent_builder = agent_builder.tls_config(tls_config);
+        if let Some(config) = tls_config {
+            agent_builder = agent_builder.tls_config((*config).clone());
         }
 
-        let agent = agent_builder.build();
-        let mut request = agent.request_url("POST", &endpoint);
-        for (k, v) in headers {
-            request = request.set(&k, &v);
-        }
-        request = request.set("Content-Type", "application/json; charset=utf-8");
-        #[cfg(feature = "compress")]
-        {
-            request = request.set("Content-Encoding", "gzip");
-        }
+        let agent = agent_builder.build().new_agent();
 
         LokiTask {
             rx,
-            request,
+            agent,
+            endpoint,
+            headers,
             labels,
             max_log_lines,
             max_log_lifetime,
@@ -78,7 +76,8 @@ impl LokiTask {
 
     // Thread loop.
     // Tries to receive messages from the channel, flushing before any limits are violated.
-    // When not processing items from the channel, we'll retry failed items if there are any and check the age constraint.
+    // When not processing items from the channel, we'll retry failed items if there are any and check the age
+    // constraint.
     pub fn run(&self) {
         let mut lp = LokiPush {
             streams: [LokiStream {
@@ -103,7 +102,7 @@ impl LokiTask {
                                 if lp.first.is_none() {
                                     lp.first = Some(time);
                                 }
-                            }
+                            },
                             LokiTaskMsg::Flush => {
                                 self.submit_logs(&mut lp, &mut dlq);
                                 self.retry_all_failed(&mut dlq);
@@ -112,19 +111,19 @@ impl LokiTask {
                                 let mut flushed = mtx.lock().unwrap();
                                 *flushed = true;
                                 cvar.notify_all();
-                            }
+                            },
                         }
                         continue;
-                    }
+                    },
                     Err(ReceiveErrorTimeout::Timeout) => {
                         break;
-                    }
+                    },
                     // This matches Closed and SendClosed
                     Err(_) => {
                         self.submit_logs(&mut lp, &mut dlq);
                         self.retry_all_failed(&mut dlq);
                         return;
-                    }
+                    },
                 }
             }
 
@@ -157,7 +156,7 @@ impl LokiTask {
             Err(e) => {
                 self.fail(lp, dlq, &e.to_string(), false);
                 return;
-            }
+            },
         };
 
         // perform gzip compression
@@ -168,37 +167,38 @@ impl LokiTask {
                 Ok(()) => match encoder.finish() {
                     Ok(w) => {
                         serialized = w;
-                    }
+                    },
                     Err(e) => {
                         self.fail(lp, dlq, &e.to_string(), false);
                         return;
-                    }
+                    },
                 },
                 Err(e) => {
                     self.fail(lp, dlq, &e.to_string(), false);
                     return;
-                }
+                },
             }
         }
 
         // attempt to send the request
-        let result = self.request.clone().send_bytes(&serialized);
-        if result.is_err() {
-            match result.expect_err("We already checked if the result was an error.") {
-                Error::Status(code, resp) => {
-                    self.fail(
-                        lp,
-                        dlq,
-                        &format!("HTTP {}: {}", code, resp.status_text()),
-                        code == 408 || code == 429 || code >= 500,
-                    );
-                    return;
-                }
-                e => {
-                    self.fail(lp, dlq, &e.to_string(), true);
-                    return;
-                }
-            }
+        let mut request = self.agent.post(&self.endpoint);
+        for (k, v) in &self.headers {
+            request = request.header(k, v);
+        }
+        request = request.content_type("application/json; charset=utf-8");
+        #[cfg(feature = "compress")]
+        {
+            request = request.header("Content-Encoding", "gzip");
+        }
+
+        if let Err(err) = request.send(&serialized) {
+            let (emsg, transistent) = if let Error::StatusCode(code) = err {
+                (format!("HTTP {code}"), code == 408 || code == 429 || code >= 500)
+            } else {
+                (err.to_string(), true)
+            };
+            self.fail(lp, dlq, &emsg, transistent);
+            return;
         }
 
         // reset shared struct
@@ -207,13 +207,7 @@ impl LokiTask {
     }
 
     // Handle failure of batch and optionally retry a transistent failure.
-    fn fail(
-        &self,
-        lp: &mut LokiPush,
-        dlq: &mut BinaryHeap<Reverse<FailedPush>>,
-        emsg: &str,
-        transistent: bool,
-    ) {
+    fn fail(&self, lp: &mut LokiPush, dlq: &mut BinaryHeap<Reverse<FailedPush>>, emsg: &str, transistent: bool) {
         if self.failure_policy == FailurePolicy::Drop || !transistent {
             eprintln!(
                 "(Loki) Failed to push batch of {} logs: {}; Dropping...",
@@ -223,7 +217,12 @@ impl LokiTask {
             return;
         } else if let FailurePolicy::Retry(max_retries) = self.failure_policy.clone() {
             if lp.failures > max_retries {
-                eprintln!("(Loki) Failed to push batch of {} logs: {}; Exceeded max retries of {}, dropping...", lp.streams[0].values.len(), emsg, max_retries);
+                eprintln!(
+                    "(Loki) Failed to push batch of {} logs: {}; Exceeded max retries of {}, dropping...",
+                    lp.streams[0].values.len(),
+                    emsg,
+                    max_retries
+                );
                 return;
             }
             eprintln!(
