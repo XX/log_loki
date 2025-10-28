@@ -19,7 +19,6 @@ use flate2::{Compression, write::GzEncoder};
 use http::Uri;
 use kanal::{ReceiveErrorTimeout, Receiver};
 use serde::Serialize;
-use serde_json::to_vec;
 #[cfg(feature = "tls")]
 use ureq::tls::TlsConfig;
 use ureq::{Agent, Error};
@@ -95,7 +94,7 @@ impl LokiTask {
                     Ok(msg) => {
                         match msg {
                             LokiTaskMsg::Log(time, log_line) => {
-                                lp.streams[0].values.push([format!("{}", time), log_line]);
+                                lp.streams[0].values.push([time.to_string(), log_line]);
                                 if lp.streams[0].values.len() == self.max_log_lines {
                                     self.submit_logs(&mut lp, &mut dlq);
                                 }
@@ -151,10 +150,10 @@ impl LokiTask {
 
         // serialize json object
         #[allow(unused_mut)]
-        let mut serialized = match to_vec(lp) {
-            Ok(v) => v,
-            Err(e) => {
-                self.fail(lp, dlq, &e.to_string(), false);
+        let mut serialized = match serde_json::to_vec(lp) {
+            Ok(vec) => vec,
+            Err(err) => {
+                self.fail(lp, dlq, &err.to_string(), false);
                 return;
             },
         };

@@ -22,7 +22,7 @@ mod task;
 use task::{LokiTask, LokiTaskMsg};
 // Write logs in LogFmt style by default
 mod fmt;
-pub use fmt::LokiFormatter;
+pub use fmt::{FormatLog, LokiFormatter};
 #[cfg(feature = "logfmt")]
 mod logfmt;
 #[cfg(feature = "logfmt")]
@@ -201,13 +201,13 @@ impl Log for Loki {
             .expect("The current moment is after the Unix Epoch.")
             .as_nanos();
 
-        let mut s = String::new();
+        let mut log_line = String::new();
         self.fmt
-            .write_record(&mut s, record)
+            .write_record(&mut log_line, record)
             .expect("LokiFormatters shouldn't fail here.");
 
         self.tx
-            .send(LokiTaskMsg::Log(now, s))
+            .send(LokiTaskMsg::Log(now, log_line))
             .expect("The other thread should be running.");
     }
 

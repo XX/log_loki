@@ -10,11 +10,10 @@ use std::collections::HashSet;
 use std::fmt::Write;
 
 use bitflags::bitflags;
-use log::Record;
 #[cfg(feature = "kv_unstable")]
 use log::kv::{Key, Value, Visitor, value::Error as LogError};
 
-use crate::LokiFormatter;
+use crate::{FormatLog, LokiFormatter};
 
 // Contains all characters that may not appear in logfmt keys
 const INVALID_KEY_CHARS: &[char] = &[' ', '=', '"'];
@@ -120,71 +119,41 @@ impl LogfmtFormatter {
 }
 
 impl LokiFormatter for LogfmtFormatter {
-    fn write_record(&self, dst: &mut String, rec: &Record) -> std::fmt::Result {
+    fn write_record(&self, dst: &mut String, rec: &dyn FormatLog) -> std::fmt::Result {
         let mut used_fields: HashSet<String> = HashSet::new();
         used_fields.reserve(10);
 
         if self.include_fields.contains(LogfmtAutoFields::LEVEL) {
-            self.write_pair(
-                dst,
-                &mut used_fields,
-                &mut "level".to_owned(),
-                &rec.level().to_string().to_lowercase(),
-            )?;
+            self.write_pair(dst, &mut used_fields, &mut "level".to_owned(), &rec.level())?;
         }
 
-        if self.include_fields.contains(LogfmtAutoFields::MESSAGE) && rec.args().to_string() != "" {
-            self.write_pair(
-                dst,
-                &mut used_fields,
-                &mut "message".to_owned(),
-                &rec.args().to_string(),
-            )?;
+        let message = rec.message();
+        if self.include_fields.contains(LogfmtAutoFields::MESSAGE) && message != "" {
+            self.write_pair(dst, &mut used_fields, &mut "message".to_owned(), &message)?;
         }
 
-        if self.include_fields.contains(LogfmtAutoFields::TARGET) && rec.target() != "" {
-            self.write_pair(dst, &mut used_fields, &mut "target".to_owned(), rec.target())?;
+        let target = rec.target();
+        if self.include_fields.contains(LogfmtAutoFields::TARGET) && target != "" {
+            self.write_pair(dst, &mut used_fields, &mut "target".to_owned(), &target)?;
         }
 
         if self.include_fields.contains(LogfmtAutoFields::MODULE_PATH) {
-            let module = {
-                if rec.module_path().is_some() {
-                    rec.module_path()
-                } else if rec.module_path_static().is_some() {
-                    rec.module_path_static()
-                } else {
-                    None
-                }
-            };
-
-            if let Some(m) = module {
-                self.write_pair(dst, &mut used_fields, &mut "module".to_owned(), m)?;
+            if let Some(module) = rec.module() {
+                self.write_pair(dst, &mut used_fields, &mut "module".to_owned(), &module)?;
             }
         }
 
         if self.include_fields.contains(LogfmtAutoFields::FILE) {
-            let file = {
-                if rec.file().is_some() {
-                    rec.file()
-                } else if rec.file_static().is_some() {
-                    rec.file_static()
-                } else {
-                    None
-                }
-            };
-
-            if let Some(f) = file {
-                self.write_pair(dst, &mut used_fields, &mut "file".to_owned(), f)?;
+            if let Some(file) = rec.file() {
+                self.write_pair(dst, &mut used_fields, &mut "file".to_owned(), &file)?;
             }
         }
 
-        if self.include_fields.contains(LogfmtAutoFields::LINE) && rec.line().is_some() {
-            self.write_pair(
-                dst,
-                &mut used_fields,
-                &mut "line".to_owned(),
-                &rec.line().unwrap().to_string(),
-            )?;
+        let line = rec.line();
+        if self.include_fields.contains(LogfmtAutoFields::LINE)
+            && let Some(line) = line
+        {
+            self.write_pair(dst, &mut used_fields, &mut "line".to_owned(), &line)?;
         }
 
         #[cfg(feature = "kv_unstable")]
@@ -256,5 +225,40 @@ impl Default for LogfmtAutoFields {
         {
             LogfmtAutoFields::LEVEL | LogfmtAutoFields::MESSAGE | LogfmtAutoFields::MODULE_PATH
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logfmt_write_record() {
+        let record = log::Record::builder()
+            .args(format_args!("log message"))
+            .level(log::Level::Info)
+            .target("target")
+            .module_path(Some("module"))
+            .file(Some("file"))
+            .line(Some(1))
+            .build();
+
+        let mut out = String::new();
+        LogfmtFormatter::default().write_record(&mut out, &record).unwrap();
+
+        assert_eq!(out, r#" level=info message="log message" module=module"#);
+
+        let mut out = String::new();
+        LogfmtFormatter::new(
+            LogfmtAutoFields::default() | LogfmtAutoFields::TARGET | LogfmtAutoFields::FILE | LogfmtAutoFields::LINE,
+            false,
+        )
+        .write_record(&mut out, &record)
+        .unwrap();
+
+        assert_eq!(
+            out,
+            r#" level=info message="log message" target=target module=module file=file line=1"#
+        );
     }
 }
