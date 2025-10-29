@@ -6,8 +6,7 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-use std::collections::HashSet;
-use std::fmt::Write;
+use std::collections::HashMap;
 
 use bitflags::bitflags;
 #[cfg(feature = "kv_unstable")]
@@ -42,13 +41,7 @@ impl LogfmtFormatter {
     }
 
     /// Write a key value pair to the underlying string. Duplicate keys are dropped.
-    fn write_pair(
-        &self,
-        dst: &mut String,
-        used_fields: &mut HashSet<String>,
-        key: &mut String,
-        val: &str,
-    ) -> std::fmt::Result {
+    fn write_pair(&self, attributes: &mut HashMap<String, String>, mut key: String, val: &str) {
         // Normalize the key
         key.retain(|c| {
             for invalid_char in INVALID_KEY_CHARS {
@@ -63,10 +56,9 @@ impl LogfmtFormatter {
         }
 
         // ensure uniqueness of the key
-        if used_fields.contains(key) {
-            return Ok(());
+        if attributes.contains_key(&key) {
+            return;
         }
-        used_fields.insert(key.clone());
 
         // reformat the value if needed
         let mut formatted_value = String::new();
@@ -107,45 +99,38 @@ impl LogfmtFormatter {
             formatted_value.push('"');
         }
 
-        write!(
-            dst,
-            "{}{}={}{}",
-            { if used_fields.is_empty() { "" } else { " " } },
-            key,
-            { if need_quotes { "\"" } else { "" } },
-            formatted_value
-        )
+        attributes.insert(key, formatted_value);
     }
 }
 
 impl LokiFormatter for LogfmtFormatter {
-    fn write_record(&self, dst: &mut String, rec: &dyn FormatLog) -> std::fmt::Result {
-        let mut used_fields: HashSet<String> = HashSet::new();
-        used_fields.reserve(10);
+    fn attributes(&self, rec: &dyn FormatLog) -> HashMap<String, String> {
+        let mut attributes = HashMap::new();
+        attributes.reserve(10);
 
         if self.include_fields.contains(LogfmtAutoFields::LEVEL) {
-            self.write_pair(dst, &mut used_fields, &mut "level".to_owned(), &rec.level())?;
+            self.write_pair(&mut attributes, "level".to_owned(), &rec.level());
         }
 
         let message = rec.message();
         if self.include_fields.contains(LogfmtAutoFields::MESSAGE) && message != "" {
-            self.write_pair(dst, &mut used_fields, &mut "message".to_owned(), &message)?;
+            self.write_pair(&mut attributes, "message".to_owned(), &message);
         }
 
         let target = rec.target();
         if self.include_fields.contains(LogfmtAutoFields::TARGET) && target != "" {
-            self.write_pair(dst, &mut used_fields, &mut "target".to_owned(), &target)?;
+            self.write_pair(&mut attributes, "target".to_owned(), &target);
         }
 
         if self.include_fields.contains(LogfmtAutoFields::MODULE_PATH) {
             if let Some(module) = rec.module() {
-                self.write_pair(dst, &mut used_fields, &mut "module".to_owned(), &module)?;
+                self.write_pair(&mut attributes, "module".to_owned(), &module);
             }
         }
 
         if self.include_fields.contains(LogfmtAutoFields::FILE) {
             if let Some(file) = rec.file() {
-                self.write_pair(dst, &mut used_fields, &mut "file".to_owned(), &file)?;
+                self.write_pair(&mut attributes, "file".to_owned(), &file);
             }
         }
 
@@ -153,36 +138,34 @@ impl LokiFormatter for LogfmtFormatter {
         if self.include_fields.contains(LogfmtAutoFields::LINE)
             && let Some(line) = line
         {
-            self.write_pair(dst, &mut used_fields, &mut "line".to_owned(), &line)?;
+            self.write_pair(&mut attributes, "line".to_owned(), &line);
         }
 
         #[cfg(feature = "kv_unstable")]
         if self.include_fields.contains(LogfmtAutoFields::EXTRA) {
             rec.key_values()
                 .visit(&mut LogfmtVisitor {
-                    dst,
                     fmt: self,
-                    used: &mut used_fields,
+                    attributes: &mut attributes,
                 })
                 .expect("This visitor should not return an error");
         }
 
-        Ok(())
+        attributes
     }
 }
 
 #[cfg(feature = "kv_unstable")]
 struct LogfmtVisitor<'a> {
-    dst: &'a mut String,
     fmt: &'a LogfmtFormatter,
-    used: &'a mut HashSet<String>,
+    attributes: &'a mut HashMap<String, String>,
 }
 
 #[cfg(feature = "kv_unstable")]
 impl<'a, 'kvs> Visitor<'kvs> for LogfmtVisitor<'a> {
     fn visit_pair(&mut self, key: Key<'kvs>, value: Value<'kvs>) -> Result<(), LogError> {
         self.fmt
-            .write_pair(self.dst, self.used, &mut key.to_string(), &value.to_string())?;
+            .write_pair(self.attributes, key.to_string(), &value.to_string());
         Ok(())
     }
 }
@@ -215,15 +198,12 @@ impl Default for LogfmtAutoFields {
     fn default() -> Self {
         #[cfg(feature = "kv_unstable")]
         {
-            LogfmtAutoFields::LEVEL
-                | LogfmtAutoFields::MESSAGE
-                | LogfmtAutoFields::MODULE_PATH
-                | LogfmtAutoFields::EXTRA
+            LogfmtAutoFields::LEVEL | LogfmtAutoFields::MODULE_PATH | LogfmtAutoFields::EXTRA
         }
 
         #[cfg(not(feature = "kv_unstable"))]
         {
-            LogfmtAutoFields::LEVEL | LogfmtAutoFields::MESSAGE | LogfmtAutoFields::MODULE_PATH
+            LogfmtAutoFields::LEVEL | LogfmtAutoFields::MODULE_PATH
         }
     }
 }
@@ -243,22 +223,39 @@ mod tests {
             .line(Some(1))
             .build();
 
-        let mut out = String::new();
-        LogfmtFormatter::default().write_record(&mut out, &record).unwrap();
+        let formatter = LogfmtFormatter::default();
+        let log_line = formatter.log_line(&record).unwrap();
+        let attributes = formatter.attributes(&record);
 
-        assert_eq!(out, r#" level=info message="log message" module=module"#);
+        assert_eq!(log_line, "log message");
+        assert_eq!(
+            attributes,
+            [("level", "info"), ("module", "module")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect()
+        );
 
-        let mut out = String::new();
-        LogfmtFormatter::new(
+        let formatter = LogfmtFormatter::new(
             LogfmtAutoFields::default() | LogfmtAutoFields::TARGET | LogfmtAutoFields::FILE | LogfmtAutoFields::LINE,
             false,
-        )
-        .write_record(&mut out, &record)
-        .unwrap();
+        );
+        let log_line = formatter.log_line(&record).unwrap();
+        let attributes = formatter.attributes(&record);
 
+        assert_eq!(log_line, "log message");
         assert_eq!(
-            out,
-            r#" level=info message="log message" target=target module=module file=file line=1"#
+            attributes,
+            [
+                ("level", "info"),
+                ("target", "target"),
+                ("module", "module"),
+                ("file", "file"),
+                ("line", "1")
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect()
         );
     }
 }

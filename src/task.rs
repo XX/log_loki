@@ -78,14 +78,7 @@ impl LokiTask {
     // When not processing items from the channel, we'll retry failed items if there are any and check the age
     // constraint.
     pub fn run(&self) {
-        let mut lp = LokiPush {
-            streams: [LokiStream {
-                stream: self.labels.clone(),
-                values: Vec::with_capacity(self.max_log_lines),
-            }],
-            first: None,
-            failures: 0,
-        };
+        let mut lp = LokiPush::new(&self.labels, self.max_log_lines);
         let mut dlq: BinaryHeap<Reverse<FailedPush>> = BinaryHeap::new();
 
         loop {
@@ -93,9 +86,10 @@ impl LokiTask {
                 match self.rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(msg) => {
                         match msg {
-                            LokiTaskMsg::Log(time, log_line) => {
-                                lp.streams[0].values.push([time.to_string(), log_line]);
-                                if lp.streams[0].values.len() == self.max_log_lines {
+                            LokiTaskMsg::Log(time, log_line, attributes) => {
+                                lp.add_log(time, log_line, &self.labels, attributes);
+
+                                if lp.log_lines() == self.max_log_lines {
                                     self.submit_logs(&mut lp, &mut dlq);
                                 }
                                 if lp.first.is_none() {
@@ -201,7 +195,7 @@ impl LokiTask {
         }
 
         // reset shared struct
-        lp.streams[0].values.clear();
+        lp.clear();
         lp.first = None;
     }
 
@@ -210,7 +204,7 @@ impl LokiTask {
         if self.failure_policy == FailurePolicy::Drop || !transistent {
             eprintln!(
                 "(Loki) Failed to push batch of {} logs: {}; Dropping...",
-                lp.streams[0].values.len(),
+                lp.log_lines(),
                 emsg
             );
             return;
@@ -218,7 +212,7 @@ impl LokiTask {
             if lp.failures > max_retries {
                 eprintln!(
                     "(Loki) Failed to push batch of {} logs: {}; Exceeded max retries of {}, dropping...",
-                    lp.streams[0].values.len(),
+                    lp.log_lines(),
                     emsg,
                     max_retries
                 );
@@ -226,7 +220,7 @@ impl LokiTask {
             }
             eprintln!(
                 "(Loki) Failed to push batch of {} logs: {}; Attempt {} of {}",
-                lp.streams[0].values.len(),
+                lp.log_lines(),
                 emsg,
                 lp.failures + 1,
                 max_retries + 1
@@ -236,7 +230,7 @@ impl LokiTask {
         lpc.failures += 1;
 
         // reset shared struct
-        lp.streams[0].values.clear();
+        lp.clear();
         lp.first = None;
 
         // calculate backoff
@@ -293,22 +287,96 @@ impl LokiTask {
 // LokiTaskMsg is used by the main thread to send messages to the LokiTask
 #[derive(Clone, Debug)]
 pub enum LokiTaskMsg {
-    Log(u128, String),
+    Log(u128, String, HashMap<String, String>),
     Flush,
 }
 
 #[derive(Serialize, Clone)]
 struct LokiPush {
+    #[cfg(feature = "multistream")]
+    streams: Vec<LokiStream>,
+
+    #[cfg(not(feature = "multistream"))]
     streams: [LokiStream; 1],
+
     #[serde(skip_serializing)]
     first: Option<u128>,
+
     #[serde(skip_serializing)]
     failures: usize,
+}
+
+impl LokiPush {
+    #[allow(unused_variables)]
+    pub fn new(labels: &HashMap<String, String>, max_log_lines: usize) -> Self {
+        Self {
+            #[cfg(feature = "multistream")]
+            streams: Vec::with_capacity(max_log_lines),
+            #[cfg(not(feature = "multistream"))]
+            streams: [LokiStream {
+                stream: labels.clone(),
+                values: Vec::with_capacity(max_log_lines),
+            }],
+            first: None,
+            failures: 0,
+        }
+    }
+
+    pub fn add_log(
+        &mut self,
+        time: u128,
+        log_line: String,
+        labels: &HashMap<String, String>,
+        mut attributes: HashMap<String, String>,
+    ) {
+        #[cfg(feature = "multistream")]
+        {
+            attributes.extend(labels.clone());
+            self.streams.push(LokiStream {
+                stream: attributes,
+                values: [[time.to_string(), log_line]],
+            });
+        }
+
+        #[cfg(not(feature = "multistream"))]
+        {
+            let message = format!(
+                "{log_line} {}",
+                attributes
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            );
+            self.streams[0].values.push([time.to_string(), message]);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        #[cfg(feature = "multistream")]
+        self.streams.clear();
+
+        #[cfg(not(feature = "multistream"))]
+        self.streams[0].values.clear();
+    }
+
+    pub fn log_lines(&self) -> usize {
+        #[cfg(feature = "multistream")]
+        return self.streams.len();
+
+        #[cfg(not(feature = "multistream"))]
+        self.streams[0].values.len()
+    }
 }
 
 #[derive(Serialize, Clone)]
 struct LokiStream {
     stream: HashMap<String, String>,
+
+    #[cfg(feature = "multistream")]
+    values: [[String; 2]; 1],
+
+    #[cfg(not(feature = "multistream"))]
     values: Vec<[String; 2]>,
 }
 
@@ -316,6 +384,7 @@ struct LokiStream {
 #[derivative(PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct FailedPush {
     retry_at: u128,
+
     #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
     push: Box<LokiPush>,
 }

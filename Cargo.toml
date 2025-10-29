@@ -33,5 +33,7 @@ compress = ["dep:flate2"]
 kv_unstable = ["log/kv_unstable"]
 # Enable logfmt format support
 logfmt = ["dep:bitflags"]
+# Enable support for sending logs as multiple streams
+multistream = []
 # Default options
-default = ["tls", "tls-native-certs", "logfmt", "compress"]
+default = ["tls", "tls-native-certs", "logfmt", "multistream", "compress"]

@@ -7,6 +7,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 
 pub trait FormatLog {
@@ -59,5 +60,11 @@ impl FormatLog for log::Record<'_> {
 /// to customize the format of the strings that get sent to Loki. By default, this crate provides a
 /// logfmt `LokiFormatter` implementation, which is used by default.
 pub trait LokiFormatter: Send + Sync {
-    fn write_record(&self, dst: &mut String, rec: &dyn FormatLog) -> fmt::Result;
+    fn log_line<'a>(&self, rec: &'a dyn FormatLog) -> Result<Cow<'a, str>, fmt::Error> {
+        Ok(rec.message())
+    }
+
+    fn attributes(&self, _rec: &dyn FormatLog) -> HashMap<String, String> {
+        Default::default()
+    }
 }
