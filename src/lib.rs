@@ -8,7 +8,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::spawn;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::Uri;
@@ -135,47 +135,55 @@ pub struct Loki {
 }
 
 impl Loki {
-    fn start(b: LokiBuilder) -> Loki {
-        let filter = b.level_filter;
+    fn start(builder: LokiBuilder) -> Self {
+        let filter = builder.level_filter;
         let (tx, rx) = unbounded::<LokiTaskMsg>();
         let flush_notif = Arc::new((Mutex::new(false), Condvar::new()));
         let flush_notif2 = Arc::clone(&flush_notif);
-        let fmt = b.formatter;
+        let fmt = builder.formatter;
 
-        spawn(move || {
-            #[cfg(feature = "tls")]
-            LokiTask::new(
-                rx,
-                flush_notif2,
-                b.endpoint,
-                b.headers,
-                b.labels,
-                b.max_log_lines,
-                b.max_log_lifetime,
-                b.failure_policy,
-                b.tls_config,
-            )
-            .run();
-            #[cfg(not(feature = "tls"))]
-            LokiTask::new(
-                rx,
-                flush_notif2,
-                b.endpoint,
-                b.headers,
-                b.labels,
-                b.max_log_lines,
-                b.max_log_lifetime,
-                b.failure_policy,
-            )
-            .run();
+        #[cfg(feature = "tls")]
+        let loki = LokiTask::new(
+            rx,
+            flush_notif2,
+            builder.endpoint,
+            builder.headers,
+            builder.labels,
+            builder.max_log_lines,
+            builder.max_log_lifetime,
+            builder.failure_policy,
+            builder.tls_config,
+        );
+        #[cfg(not(feature = "tls"))]
+        let loki = LokiTask::new(
+            rx,
+            flush_notif2,
+            builder.endpoint,
+            builder.headers,
+            builder.labels,
+            builder.max_log_lines,
+            builder.max_log_lifetime,
+            builder.failure_policy,
+        );
+
+        thread::spawn(move || {
+            loki.run();
         });
 
-        Loki {
+        Self {
             tx,
             level_filter: filter,
             flush_notif,
             fmt: fmt.expect("When the logfmt feature is disabled, you are required to provide a formatter."),
         }
+    }
+
+    pub fn level_filter(&self) -> LevelFilter {
+        self.level_filter
+    }
+
+    pub fn fmt(&self) -> &dyn LokiFormatter {
+        &*self.fmt
     }
 
     /// Installs the logger as the default logger for the entire program.
@@ -184,18 +192,8 @@ impl Loki {
         set_max_level(self.level_filter);
         set_boxed_logger(Box::from(self))
     }
-}
 
-impl Log for Loki {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.level_filter
-    }
-
-    fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
-
+    pub fn send_log(&self, record: &dyn FormatLog) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("The current moment is after the Unix Epoch.")
@@ -209,7 +207,7 @@ impl Log for Loki {
             .expect("The other thread should be running.");
     }
 
-    fn flush(&self) {
+    pub fn send_and_white_flush(&self) {
         let (mtx, cvar) = &*self.flush_notif;
         let mut flushed = mtx.lock().unwrap();
 
@@ -222,5 +220,23 @@ impl Log for Loki {
         while !*flushed {
             flushed = cvar.wait(flushed).unwrap();
         }
+    }
+}
+
+impl Log for Loki {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= self.level_filter
+    }
+
+    fn log(&self, record: &Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        self.send_log(record as &dyn FormatLog);
+    }
+
+    fn flush(&self) {
+        self.send_and_white_flush();
     }
 }

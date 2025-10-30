@@ -50,7 +50,7 @@ impl LokiTask {
         max_log_lifetime: Duration,
         failure_policy: FailurePolicy,
         #[cfg(feature = "tls")] tls_config: Option<Arc<TlsConfig>>,
-    ) -> LokiTask {
+    ) -> Self {
         let mut agent_builder = Agent::config_builder().timeout_global(Some(Duration::from_secs(30)));
 
         #[cfg(feature = "tls")]
@@ -60,7 +60,7 @@ impl LokiTask {
 
         let agent = agent_builder.build().new_agent();
 
-        LokiTask {
+        Self {
             rx,
             agent,
             endpoint,

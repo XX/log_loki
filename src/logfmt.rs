@@ -113,25 +113,25 @@ impl LokiFormatter for LogfmtFormatter {
         }
 
         let message = rec.message();
-        if self.include_fields.contains(LogfmtAutoFields::MESSAGE) && message != "" {
+        if self.include_fields.contains(LogfmtAutoFields::MESSAGE) && !message.is_empty() {
             self.write_pair(&mut attributes, "message".to_owned(), &message);
         }
 
         let target = rec.target();
-        if self.include_fields.contains(LogfmtAutoFields::TARGET) && target != "" {
+        if self.include_fields.contains(LogfmtAutoFields::TARGET) && !target.is_empty() {
             self.write_pair(&mut attributes, "target".to_owned(), &target);
         }
 
-        if self.include_fields.contains(LogfmtAutoFields::MODULE_PATH) {
-            if let Some(module) = rec.module() {
-                self.write_pair(&mut attributes, "module".to_owned(), &module);
-            }
+        if self.include_fields.contains(LogfmtAutoFields::MODULE_PATH)
+            && let Some(module) = rec.module()
+        {
+            self.write_pair(&mut attributes, "module".to_owned(), &module);
         }
 
-        if self.include_fields.contains(LogfmtAutoFields::FILE) {
-            if let Some(file) = rec.file() {
-                self.write_pair(&mut attributes, "file".to_owned(), &file);
-            }
+        if self.include_fields.contains(LogfmtAutoFields::FILE)
+            && let Some(file) = rec.file()
+        {
+            self.write_pair(&mut attributes, "file".to_owned(), &file);
         }
 
         let line = rec.line();
